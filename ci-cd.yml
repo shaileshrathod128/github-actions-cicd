@@ -1,0 +1,76 @@
+name: CI/CD to EC2 with Multi-Env
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment"
+        required: true
+        default: "dev"
+        type: choice
+        options:
+          - dev
+          - staging
+          - prod
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    env:
+      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: 18
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        run: npm test
+
+      - name: Build the app
+        run: npm run build
+
+      - name: Set environment variables
+        id: set-env
+        run: |
+          echo "EC2_HOST=${{ secrets[format('{0}_EC2_HOST', github.event.inputs.environment | upper)] }}" >> $GITHUB_ENV
+          echo "EC2_USER=${{ secrets[format('{0}_EC2_USER', github.event.inputs.environment | upper)] }}" >> $GITHUB_ENV
+          echo "EC2_KEY=${{ secrets[format('{0}_EC2_KEY', github.event.inputs.environment | upper)] }}" >> $GITHUB_ENV
+          echo "APP_PATH=${{ secrets[format('{0}_APP_PATH', github.event.inputs.environment | upper)] }}" >> $GITHUB_ENV
+
+      - name: Write EC2 SSH Key
+        run: |
+          echo "$EC2_KEY" > ec2_key.pem
+          chmod 600 ec2_key.pem
+
+      - name: Deploy to EC2
+        run: |
+          ssh -o StrictHostKeyChecking=no -i ec2_key.pem $EC2_USER@$EC2_HOST <<EOF
+            cd $APP_PATH
+            git pull origin main
+            npm install
+            npm run build
+            pm2 restart app || pm2 start npm --name "app" -- start
+          EOF
+
+      - name: Notify Slack - Success
+        if: success()
+        run: |
+          curl -X POST -H 'Content-type: application/json' \
+          --data "{\"text\":\"✅ Deployment to *${{ github.event.inputs.environment }}* successful for *${{ github.repository }}*.\"}" \
+          $SLACK_WEBHOOK_URL
+
+      - name: Notify Slack - Failure
+        if: failure()
+        run: |
+          curl -X POST -H 'Content-type: application/json' \
+          --data "{\"text\":\"❌ Deployment to *${{ github.event.inputs.environment }}* failed for *${{ github.repository }}*.\"}" \
+          $SLACK_WEBHOOK_URL
